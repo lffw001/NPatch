@@ -18,6 +18,7 @@ buildscript {
     }
     dependencies {
         classpath("org.eclipse.jgit:org.eclipse.jgit:6.3.0.202209071007-r")
+        classpath(kotlin("gradle-plugin", version = "1.8.21"))
     }
 }
 
@@ -42,19 +43,20 @@ val (coreCommitCount, coreLatestTag) = FileRepositoryBuilder().setGitDir(rootPro
         }
     }.getOrNull() ?: (1 to "1.0")
 
-val defaultManagerPackageName by extra("org.lsposed.lspatch")
+// sync from OPatch
+val defaultManagerPackageName by extra("org.lsposed.opatch")
 val apiCode by extra(93)
-val verCode by extra(428)
+val verCode by extra(429)
 val verName by extra("0.6.1")
 val coreVerCode by extra(coreCommitCount)
 val coreVerName by extra(coreLatestTag)
-val androidMinSdkVersion by extra(27)
+val androidMinSdkVersion by extra(28)
 val androidTargetSdkVersion by extra(34)
 val androidCompileSdkVersion by extra(34)
 val androidCompileNdkVersion by extra("25.2.9519653")
 val androidBuildToolsVersion by extra("34.0.0")
-val androidSourceCompatibility by extra(JavaVersion.VERSION_17)
-val androidTargetCompatibility by extra(JavaVersion.VERSION_17)
+val androidSourceCompatibility by extra(JavaVersion.VERSION_21)
+val androidTargetCompatibility by extra(JavaVersion.VERSION_21)
 
 tasks.register<Delete>("clean") {
     delete(rootProject.buildDir)

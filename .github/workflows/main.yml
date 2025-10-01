@@ -1,15 +1,13 @@
-name: Build Android CI
+name: Build Adnroid CI
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ master ]
-  pull_request:
 
 jobs:
   build:
-    name: Build 
-    runs-on: ubuntu-latest 
+    name: Build on Ubuntu
+    runs-on: ubuntu-latest
+
     env:
       CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
       CCACHE_NOHASHDIR: 'true'
@@ -17,43 +15,20 @@ jobs:
       CCACHE_BASEDIR: '${{ github.workspace }}'
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
+    - name: Checkout repository
+      uses: actions/checkout@v4
       with:
-        submodules: 'recursive'
         fetch-depth: 0
+        submodules: 'false'
 
-    - name: Write key
-      if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
-      run: |
-        if [ ! -z "${{ secrets.KEY_STORE }}" ]; then
-          echo androidStorePassword='${{ secrets.KEY_STORE_PASSWORD }}' >> gradle.properties
-          echo androidKeyAlias='${{ secrets.ALIAS }}' >> gradle.properties
-          echo androidKeyPassword='${{ secrets.KEY_PASSWORD }}' >> gradle.properties
-          echo androidStoreFile='key.jks' >> gradle.properties
-          echo ${{ secrets.KEY_STORE }} | base64 --decode > key.jks
-        fi
-
-    - name: Checkout libxposed/api
-      uses: actions/checkout@v3
-      with:
-        repository: libxposed/api
-        path: libxposed/api
-
-    - name: Checkout libxposed/service
-      uses: actions/checkout@v3
-      with:
-        repository: libxposed/service
-        path: libxposed/service
-
-    - name: Setup Java
-      uses: actions/setup-java@v3
+    - name: Set up JDK
+      uses: actions/setup-java@v4
       with:
         java-version: '17'
-        distribution: 'temurin'
+        distribution: 'zulu'
 
-    - name: Setup Gradle
-      uses: gradle/gradle-build-action@v2
+    - name: Cache Gradle packages
+      uses: gradle/gradle-build-action@v3
       with:
         gradle-home-cache-cleanup: true
 
@@ -61,52 +36,111 @@ jobs:
       uses: hendrikmuhs/ccache-action@v1.2
       with:
         max-size: 2G
-        key: ${{ runner.os }}
-        restore-keys: ${{ runner.os }}
+        key: ccache-${{ runner.os }}-${{ github.sha }}
+        restore-keys: |
+          ccache-${{ runner.os }}-
         save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
-    - name: Build dependencies
-      working-directory: libxposed
-      run: |
-        cd api
-        echo 'org.gradle.jvmargs=-Xmx2048m' >> gradle.properties
-        ./gradlew :api:publishApiPublicationToMavenLocal
-        cd ..
-        cd service
-        echo 'org.gradle.jvmargs=-Xmx2048m' >> gradle.properties
-        ./gradlew :interface:publishInterfacePublicationToMavenLocal
-
-    - name: Build with Gradle
-      run: |
-        echo 'org.gradle.parallel=true' >> gradle.properties
-        echo 'org.gradle.jvmargs=-Xmx2048m' >> gradle.properties
-        echo 'android.native.buildOutput=verbose' >> gradle.properties
-        ./gradlew buildAll
-
-    - name: Upload Debug artifact
-      uses: actions/upload-artifact@v3
+    - name: Cache local Maven repository
+      uses: actions/cache@v4
       with:
-        name: npatch-debug
+        path: ~/.m2/repository
+        key: maven-${{ runner.os }}-${{ hashFiles('libxposed/api/**', 'libxposed/service/**') }}
+        restore-keys: |
+          maven-${{ runner.os }}-
+
+    - name: Configure release signing key
+      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      run: |
+        if [ -n "${{ secrets.KEY_STORE }}" ]; then
+          echo "正在配置签名属性..."
+          cat << EOF >> gradle.properties
+          androidStorePassword=${{ secrets.KEY_STORE_PASSWORD }}
+          androidKeyAlias=${{ secrets.ALIAS }}
+          androidKeyPassword=${{ secrets.KEY_PASSWORD }}
+          androidStoreFile=key.jks
+          EOF
+          echo ${{ secrets.KEY_STORE }} | base64 --decode > key.jks
+          echo "签名密钥配置完成。"
+        else
+          echo "签名密钥未配置，跳过签名步骤。"
+        fi
+      shell: bash
+
+    - name: Build project with Gradle
+      run: |
+        cat << EOF >> gradle.properties
+        org.gradle.parallel=true
+        org.gradle.jvmargs=-Xmx2048m
+        android.native.buildOutput=verbose
+        EOF
+
+        echo "正在构建 libxposed API..."
+        (cd libxposed/api && ./gradlew :api:publishApiPublicationToMavenLocal)
+
+        echo "正在构建 libxposed service..."
+        (cd libxposed/service && ./gradlew :interface:publishInterfacePublicationToMavenLocal)
+
+        echo "正在构建 NPatch..."
+        ./gradlew buildAll
+      shell: bash
+
+    - name: Upload Debug artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: lspatch-debug
         path: out/debug/*
 
-    - name: Upload Release artifact
-      uses: actions/upload-artifact@v3
+    - name: Upload Release artifacts
+      uses: actions/upload-artifact@v4
       with:
-        name: npatch-release
+        name: lspatch-release
         path: out/release/*
 
-    - name: Upload symbols
-      uses: actions/upload-artifact@v3
-      with:
-        name: symbols
-        path: |
-          patch-loader/build/symbols
-
-    - name: Upload mappings
-      uses: actions/upload-artifact@v3
+    - name: Upload ProGuard mappings
+      uses: actions/upload-artifact@v4
       with:
         name: mappings
         path: |
           patch-loader/build/outputs/mapping
           manager/build/outputs/mapping
 
+    - name: Upload native symbols
+      uses: actions/upload-artifact@v4
+      with:
+        name: symbols
+        path: patch-loader/build/symbols
+
+    - name: Post artifacts to Telegram
+      if: success() && github.event_name == 'push' && github.ref == 'refs/heads/master'
+      env:
+        CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+      run: |
+        if [ -n "${{ secrets.BOT_TOKEN }}" ]; then
+          jarRelease=$(find out/release -name "*.jar")
+          managerRelease=$(find out/release -name "*.apk")
+          jarDebug=$(find out/debug -name "*.jar")
+          managerDebug=$(find out/debug -name "*.apk")
+
+          CAPTION=$(echo "$COMMIT_MESSAGE" | head -n 1)
+          
+          echo "正在上传产物到 Telegram..."
+          
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup" \
+            -F chat_id="${CHANNEL_ID}" \
+            -F media='[
+                {"type": "document", "media": "attach://jarRelease"},
+                {"type": "document", "media": "attach://managerRelease"},
+                {"type": "document", "media": "attach://jarDebug"},
+                {"type": "document", "media": "attach://managerDebug", "caption": "'"${CAPTION}"'"}
+              ]' \
+            -F jarRelease="@${jarRelease}" \
+            -F managerRelease="@${managerRelease}" \
+            -F jarDebug="@${jarDebug}" \
+            -F managerDebug="@${managerDebug}"
+        else
+          echo "BOT_TOKEN 未配置，跳过发送到 Telegram。"
+        fi
+      shell: bash
